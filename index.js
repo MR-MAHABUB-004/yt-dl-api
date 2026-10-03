@@ -4,19 +4,9 @@ const FormData = require('form-data');
 
 const app = express();
 const PORT = process.env.PORT || 7270;
-
-// --- Configuration ---
 const BASE_URL = "https://ytdl.lol";
 
-const COOKIES = {
-  csrftoken: "bltPTuaGWcwGqUXIMWbSxEsngQwUgFz0",
-  dom3ic8zudi28v8lr6fgphwffqoz0j6c: "01a0fbe7-0d44-727c-a537-daf07d93b329%3A3%3A1"
-};
-
-// Format cookies into a single header string
-const cookieString = Object.entries(COOKIES).map(([k, v]) => `${k}=${v}`).join('; ');
-
-// Base headers shared across requests
+// Base headers (without cookies/CSRF, we will inject those dynamically)
 const BASE_HEADERS = {
   "Host": "ytdl.lol",
   "Connection": "keep-alive",
@@ -32,14 +22,45 @@ const BASE_HEADERS = {
   "Sec-Fetch-Dest": "empty",
   "Referer": "https://ytdl.lol/",
   "Accept-Encoding": "gzip, deflate, br, zstd",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Cookie": cookieString
+  "Accept-Language": "en-US,en;q=0.9"
 };
 
-// Helper function for polling delay
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- API Endpoint ---
+// Helper to get a fresh session and CSRF token
+async function getFreshSession() {
+  const homeRes = await axios.get(BASE_URL, { headers: BASE_HEADERS });
+  const setCookies = homeRes.headers['set-cookie'] || [];
+  
+  let csrfToken = null;
+  let cookiesArray = [];
+
+  // Extract all cookies and find the CSRF token
+  for (const cookie of setCookies) {
+    const keyValue = cookie.split(';')[0]; // e.g., csrftoken=abc123
+    cookiesArray.push(keyValue);
+    
+    if (keyValue.startsWith('csrftoken=')) {
+      csrfToken = keyValue.split('=')[1];
+    }
+  }
+
+  // Fallback: If the token isn't in the cookies, try to extract it from the HTML body
+  if (!csrfToken && homeRes.data) {
+    const match = homeRes.data.match(/name="csrfmiddlewaretoken" value="([^"]+)"/);
+    if (match) csrfToken = match[1];
+  }
+
+  if (!csrfToken) {
+    throw new Error("Could not extract a fresh CSRF token from the homepage.");
+  }
+
+  return {
+    csrfToken,
+    cookieString: cookiesArray.join('; ')
+  };
+}
+
 app.get('/dl', async (req, res) => {
   const ytUrl = req.query.url;
 
@@ -49,20 +70,25 @@ app.get('/dl', async (req, res) => {
 
   try {
     // ==========================================
+    // STEP 0: Get Fresh Session & CSRF Token
+    // ==========================================
+    const { csrfToken, cookieString } = await getFreshSession();
+
+    // ==========================================
     // STEP 1: Initiate Download
     // ==========================================
     const form = new FormData();
-    form.append('csrfmiddlewaretoken', 'S5DtMKyDICkKemK8hER5VPnX0PMMgrlATgW8v4y9uEGgu6xGTqSNijFa6v8wmWKq');
+    form.append('csrfmiddlewaretoken', csrfToken);
     form.append('yt_link', ytUrl);
     form.append('theme_val', '0');
     form.append('video_quality', 'medium');
     form.append('audio_quality', 'medium');
     form.append('action', 'video');
 
-    // Merge base headers with CSRF token and dynamically generated Form headers (Content-Type + boundary)
     const initHeaders = {
       ...BASE_HEADERS,
-      "X-CSRFToken": "S5DtMKyDICkKemK8hER5VPnX0PMMgrlATgW8v4y9uEGgu6xGTqSNijFa6v8wmWKq",
+      "X-CSRFToken": csrfToken,
+      "Cookie": cookieString,
       ...form.getHeaders() 
     };
 
@@ -70,17 +96,24 @@ app.get('/dl', async (req, res) => {
       headers: initHeaders
     });
 
-    const taskId = initResponse.data.task_id;
+    // DEBUG: Log the raw response to see exactly what the server returns if it fails
+    console.log("Initiate Response Data:", initResponse.data);
+
+    const taskId = initResponse.data?.task_id;
     if (!taskId) {
-      throw new Error("Failed to get task_id from initiate request.");
+      throw new Error(`Failed to get task_id. Server responded with: ${JSON.stringify(initResponse.data)}`);
     }
 
     // ==========================================
     // STEP 2: Poll for Task Status
     // ==========================================
     const statusUrl = `${BASE_URL}/task_status/${taskId}/`;
-    const statusHeaders = { ...BASE_HEADERS }; // No need for CSRF or Form headers for GET
-    const maxRetries = 60; // Timeout after 2 minutes (60 * 2s)
+    const statusHeaders = { 
+      ...BASE_HEADERS,
+      "Cookie": cookieString // Keep the session alive for the GET request
+    };
+    
+    const maxRetries = 60; 
 
     for (let i = 0; i < maxRetries; i++) {
       const statusResponse = await axios.get(statusUrl, { headers: statusHeaders });
@@ -91,27 +124,23 @@ app.get('/dl', async (req, res) => {
           status: "success",
           task_id: taskId,
           metadata: statusData.result,
-          // Note: Construct the actual download URL based on how the remote server serves files
           download_url_hint: `${BASE_URL}/download/${taskId}/` 
         });
       } else if (statusData.state === "FAILURE") {
         throw new Error("Download task failed on the remote server.");
       }
 
-      // Wait 2 seconds before the next poll
       await sleep(2000);
     }
 
     throw new Error("Timeout: Video processing took too long.");
 
   } catch (error) {
-    console.error("Error processing request:", error.message);
+    console.error("❌ Error processing request:", error.message);
     res.status(500).json({ error: error.message || "Internal Server Error" });
   }
 });
 
-// --- Start Server ---
 app.listen(PORT, () => {
   console.log(`🚀 YT Downloader API is running on http://localhost:${PORT}`);
-  console.log(`👉 Try it: http://localhost:${PORT}/dl?url=https://youtu.be/yamydvwqA_k`);
 });
