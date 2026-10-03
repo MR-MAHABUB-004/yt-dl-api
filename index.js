@@ -6,7 +6,9 @@ const app = express();
 const PORT = process.env.PORT || 7270;
 const BASE_URL = "https://ytdl.lol";
 
-// Base headers (without cookies/CSRF, we will inject those dynamically)
+// Base headers 
+// NOTE: "Accept-Encoding" is intentionally removed so axios can automatically 
+// decompress gzip/deflate responses behind the scenes.
 const BASE_HEADERS = {
   "Host": "ytdl.lol",
   "Connection": "keep-alive",
@@ -21,10 +23,10 @@ const BASE_HEADERS = {
   "Sec-Fetch-Mode": "cors",
   "Sec-Fetch-Dest": "empty",
   "Referer": "https://ytdl.lol/",
-  "Accept-Encoding": "gzip, deflate, br, zstd",
   "Accept-Language": "en-US,en;q=0.9"
 };
 
+// Helper function for polling delay
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Helper to get a fresh session and CSRF token
@@ -96,9 +98,6 @@ app.get('/dl', async (req, res) => {
       headers: initHeaders
     });
 
-    // DEBUG: Log the raw response to see exactly what the server returns if it fails
-    console.log("Initiate Response Data:", initResponse.data);
-
     const taskId = initResponse.data?.task_id;
     if (!taskId) {
       throw new Error(`Failed to get task_id. Server responded with: ${JSON.stringify(initResponse.data)}`);
@@ -113,7 +112,7 @@ app.get('/dl', async (req, res) => {
       "Cookie": cookieString // Keep the session alive for the GET request
     };
     
-    const maxRetries = 60; 
+    const maxRetries = 60; // Timeout after ~2 minutes
 
     for (let i = 0; i < maxRetries; i++) {
       const statusResponse = await axios.get(statusUrl, { headers: statusHeaders });
@@ -124,12 +123,14 @@ app.get('/dl', async (req, res) => {
           status: "success",
           task_id: taskId,
           metadata: statusData.result,
+          // Note: Construct the actual download URL based on how the remote server serves files
           download_url_hint: `${BASE_URL}/download/${taskId}/` 
         });
       } else if (statusData.state === "FAILURE") {
         throw new Error("Download task failed on the remote server.");
       }
 
+      // Wait 2 seconds before the next poll
       await sleep(2000);
     }
 
@@ -141,6 +142,7 @@ app.get('/dl', async (req, res) => {
   }
 });
 
+// --- Start Server ---
 app.listen(PORT, () => {
   console.log(`🚀 YT Downloader API is running on http://localhost:${PORT}`);
 });
