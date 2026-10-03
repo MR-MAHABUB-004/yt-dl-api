@@ -120,12 +120,13 @@ app.get('/dl', async (req, res) => {
 
       if (statusData.state === "SUCCESS") {
         return res.json({
-          status: "success",
-          task_id: taskId,
-          metadata: statusData.result,
-          // Note: Construct the actual download URL based on how the remote server serves files
-          download: `${BASE_URL}/download_ready/${taskId}/`
-        });
+  status: "success",
+  task_id: taskId,
+  metadata: statusData.result,
+  download: `${BASE_URL}/download_ready/${taskId}/`
+});
+
+        
       } else if (statusData.state === "FAILURE") {
         throw new Error("Download task failed on the remote server.");
       }
