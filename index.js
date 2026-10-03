@@ -124,6 +124,7 @@ app.get('/dl', async (req, res) => {
           task_id: taskId,
           metadata: statusData.result,
           // Note: Construct the actual download URL based on how the remote server serves files
+          download: `https://ytdl.lol/download_ready/${taskId}/`,
           download_url_hint: `${BASE_URL}/download/${taskId}/` 
         });
       } else if (statusData.state === "FAILURE") {
