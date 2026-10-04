@@ -1,7 +1,5 @@
 const express = require('express');
 const axios = require('axios');
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,7 +7,7 @@ const PORT = process.env.PORT || 3000;
 // --- Helper Functions ---
 
 /**
- * Extracts the 11-character YouTube video ID from various URL formats.
+ * Extracts the 11-character video ID from various YouTube URL formats.
  */
 function extractYoutubeId(url) {
     const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
@@ -18,128 +16,96 @@ function extractYoutubeId(url) {
 }
 
 /**
- * Uses a headless browser to solve the JS challenge and intercept the fresh cap_token.
+ * Executes the reverse-engineered dlsrv.online API flow.
  */
-async function getFreshCapToken(videoId) {
-    // Launch using the pre-compiled binary path provided by @sparticuz/chromium
-    const browser = await puppeteer.launch({
-        args: [...chromium.args, '--hide-scrollbars', '--disable-web-security'],
-        defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath(),
-        headless: chromium.headless,
-    });
-
-    const page = await browser.newPage();
-    
-    // Set a mobile user agent to match the target site's expectations
-    await page.setUserAgent('Mozilla/5.0 (Linux; Android 13; TECNO BG7 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.36 Mobile Safari/537.36');
-
-    let capToken = null;
-
-    // Intercept network requests to catch the /api/verify payload
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-        if (req.url().includes('/api/verify') && req.method() === 'POST') {
-            const postData = req.postData();
-            if (postData) {
-                try {
-                    const json = JSON.parse(postData);
-                    if (json.capToken) {
-                        capToken = json.capToken;
-                    }
-                } catch (e) {
-                    // Ignore JSON parse errors for non-JSON payloads
-                }
-            }
+async function getDownloadLinks(videoId, formatType = "mp3", quality = "320") {
+    // Create an axios instance to act as a session (persists headers)
+    const session = axios.create({
+        headers: {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; TECNO BG7 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.36 Mobile Safari/537.36",
+            "sec-ch-ua-platform": "\"Android\"",
+            "sec-ch-ua-mobile": "?1",
+            "X-Requested-With": "mark.via.gq",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Origin": "https://embed.dlsrv.online",
+            "Referer": `https://embed.dlsrv.online/v2/full?videoId=${videoId}`
         }
-        req.continue();
     });
 
     try {
-        // Navigate to the embed page. The frontend JS will automatically 
-        // solve the challenge and call /api/verify.
-        await page.goto(`https://embed.dlsrv.online/v2/full?videoId=${videoId}`, { 
-            waitUntil: 'networkidle2', 
-            timeout: 30000 
+        // 1. Fetch Challenge (Anti-bot)
+        const challengeUrl = "https://check.dlsrv.online/30bb427100/challenge";
+        await session.post(challengeUrl);
+
+        // 2. Verify Token to get JWT
+        // IMPORTANT: In a production environment, you must solve the 'instrumentation' 
+        // payload from step 1 to generate a valid capToken.
+        const capToken = "30bb427100:23c071092a584d4f:2179cba9d7b996d30f82c4212e6cc7";
+        
+        const verifyRes = await session.post("https://embed.dlsrv.online/api/verify", { 
+            capToken 
         });
         
-        // Wait specifically for the verify request to ensure the token is captured
-        await page.waitForRequest(req => req.url().includes('/api/verify'), { timeout: 20000 });
-    } catch (error) {
-        console.error("Puppeteer navigation/wait error:", error.message);
-    }
-
-    await browser.close();
-
-    if (!capToken) {
-        throw new Error("Failed to extract cap_token. The site's anti-bot protection may have changed.");
-    }
-    
-    return capToken;
-}
-
-/**
- * Executes the API flow using Axios and the fresh cap_token.
- */
-async function getDownloadLinks(videoId, capToken, format = 'mp3', quality = '320') {
-    const instance = axios.create({
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; TECNO BG7 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.36 Mobile Safari/537.36',
-            'Origin': 'https://embed.dlsrv.online',
-            'Referer': `https://embed.dlsrv.online/v2/full?videoId=${videoId}`,
-            'X-Requested-With': 'mark.via.gq',
-            'Content-Type': 'application/json'
+        const authToken = verifyRes.data.token;
+        if (!authToken) {
+            throw new Error("Failed to retrieve auth token. The capToken might have expired.");
         }
-    });
 
-    // 1. Verify Token to get JWT
-    const verifyRes = await instance.post('https://embed.dlsrv.online/api/verify', { capToken });
-    const authToken = verifyRes.data.token;
-    if (!authToken) throw new Error("Failed to retrieve auth token from /api/verify.");
-    
-    // Add JWT to all subsequent requests
-    instance.defaults.headers.common['Authorization'] = `Bearer ${authToken}`;
+        // Update session headers with the new auth token
+        session.defaults.headers.common["Authorization"] = `Bearer ${authToken}`;
 
-    // 2. Touch Session (Keep-alive)
-    await instance.post('https://embed.dlsrv.online/api/session/touch', { videoId });
+        // 3. Touch Session
+        await session.post("https://embed.dlsrv.online/api/session/touch", { 
+            videoId 
+        });
 
-    // 3. Get Download URL
-    const endpoint = format === 'mp4' ? 'mp4' : 'mp3';
-    const dlRes = await instance.post(`https://embed.dlsrv.online/api/download/${endpoint}`, {
-        videoId,
-        format,
-        quality
-    });
+        // 4. Get Download URL
+        const downloadEndpoint = formatType === "mp3" 
+            ? "https://embed.dlsrv.online/api/download/mp3" 
+            : "https://embed.dlsrv.online/api/download/mp4";
+            
+        const downloadRes = await session.post(downloadEndpoint, {
+            videoId,
+            format: formatType,
+            quality
+        });
 
-    return dlRes.data;
+        return downloadRes.data;
+
+    } catch (error) {
+        // Map errors to match the Python HTTPException behavior
+        if (error.response) {
+            const err = new Error(`Upstream API error: ${error.message}`);
+            err.status = 502;
+            throw err;
+        } else {
+            const err = new Error(error.message);
+            err.status = 500;
+            throw err;
+        }
+    }
 }
 
 // --- API Endpoints ---
 
 app.get('/dl', async (req, res) => {
-    const { url, format = 'mp3', quality = '320' } = req.query;
-
-    if (!url) {
-        return res.status(400).json({ success: false, error: "Missing 'url' query parameter." });
-    }
-
-    const videoId = extractYoutubeId(url);
-    if (!videoId) {
-        return res.status(400).json({ success: false, error: "Invalid YouTube URL. Could not extract Video ID." });
-    }
-
     try {
-        console.log(`[Request] Processing video: ${videoId} | Format: ${format} | Quality: ${quality}`);
-        
-        // Step 1: Get a fresh token using the headless browser
-        const capToken = await getFreshCapToken(videoId);
-        console.log(`[Success] Extracted cap_token for ${videoId}`);
-        
-        // Step 2: Use the fresh token to get the download link
-        const result = await getDownloadLinks(videoId, capToken, format, quality);
-        console.log(`[Success] Generated download link for ${videoId}`);
+        const { url, format = 'mp3', quality = '320' } = req.query;
 
-        // Step 3: Return clean JSON response
+        if (!url) {
+            return res.status(400).json({ error: "Missing 'url' query parameter." });
+        }
+
+        // 1. Validate and extract Video ID
+        const videoId = extractYoutubeId(url);
+        if (!videoId) {
+            return res.status(400).json({ error: "Invalid YouTube URL. Could not extract Video ID." });
+        }
+
+        // 2. Fetch download data
+        const result = await getDownloadLinks(videoId, format, quality);
+
+        // 3. Return clean JSON response
         res.json({
             success: true,
             video_id: videoId,
@@ -151,24 +117,16 @@ app.get('/dl', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error processing request:", error.message);
-        res.status(500).json({ 
-            success: false, 
-            error: "Failed to generate download link.", 
-            details: error.message 
-        });
+        const statusCode = error.status || 500;
+        res.status(statusCode).json({ error: error.message });
     }
 });
 
 app.get('/', (req, res) => {
-    res.json({ 
-        message: "YouTube Downloader API is running.", 
-        usage: "/dl?url=<youtube_url>&format=mp3&quality=320" 
-    });
+    res.json({ message: "YouTube Downloader API is running. Use /dl?url=<youtube_url>" });
 });
 
 // --- Start Server ---
 app.listen(PORT, () => {
-    console.log(`🚀 Server is running on port ${PORT}`);
-    console.log(`📖 Try it: http://localhost:${PORT}/dl?url=https://www.youtube.com/watch?v=7WPiaHjl8AE`);
+    console.log(`Server is running on http://localhost:${PORT}`);
 });
