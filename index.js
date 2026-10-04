@@ -5,65 +5,76 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const PORT = process.env.PORT || 7270;
 
-// Configure axios with a 120-second (2 minute) timeout as requested
+// Configure axios with realistic browser headers to bypass basic bot detection
 const apiClient = axios.create({
-    timeout: 120000,
+    timeout: 120000, // 2 minutes
     headers: {
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Content-Type': 'application/json;charset=UTF-8',
         'User-Agent': 'Mozilla/5.0 (Linux; Android 13; TECNO BG7 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.36 Mobile Safari/537.36',
+        'sec-ch-ua': '"Android WebView";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
+        'sec-ch-ua-mobile': '?1',
+        'sec-ch-ua-platform': '"Android"',
         'Origin': 'https://audiocleaner.ai',
-        'Referer': 'https://audiocleaner.ai/'
+        'Referer': 'https://audiocleaner.ai/youtube-video-download',
+        'Sec-Fetch-Site': 'cross-site',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Dest': 'empty'
     }
 });
 
 /**
- * TODO: REVERSE-ENGINEER THIS FUNCTION
- * Extract the actual algorithm from the Chrome Extension or Website's obfuscated JS.
- * It likely uses CryptoJS, WebCrypto API, or a custom HMAC hash combining the payload, timestamp, and nonce.
+ * TODO: Replace this with the actual algorithm extracted from the website's JS.
+ * Without the correct signature, the API will reject the request.
  */
 function generateSign(payload, timestamp, nonce) {
+    // Example placeholder: return crypto.createHmac('sha256', 'secret').update(timestamp + nonce).digest('hex');
     return 'PLACEHOLDER_SIGN_REPLACE_ME';
 }
 
-/**
- * TODO: REVERSE-ENGINEER THIS FUNCTION
- * Extract the actual algorithm from the Chrome Extension or Website's obfuscated JS.
- */
 function generateSecretKey(payload, timestamp, nonce) {
     return 'PLACEHOLDER_SECRET_KEY_REPLACE_ME';
 }
 
 app.get('/api/dl', async (req, res) => {
-    const { url: youtubeUrl } = req.query;
+    // 1. Fix URL parsing: Reconstruct the URL if Express split it at the '?'
+    let youtubeUrl = req.query.url;
+    if (req.query.si) {
+        youtubeUrl = `${youtubeUrl}?si=${req.query.si}`;
+    }
 
-    if (!youtubeUrl) {
-        return res.status(400).json({ error: 'YouTube URL is required. Usage: /api/dl?url=<youtube_url>' });
+    if (!youtubeUrl || (!youtubeUrl.includes('youtube.com') && !youtubeUrl.includes('youtu.be'))) {
+        return res.status(400).json({ 
+            success: false,
+            error: 'Valid YouTube URL is required. Usage: /api/dl?url=https://youtu.be/...' 
+        });
     }
 
     try {
+        console.log(`[INFO] Processing download for: ${youtubeUrl}`);
         const timestamp = Math.floor(Date.now() / 1000).toString();
         
         // ==========================================
-        // STEP 1: Initialize task on audiocleaner.ai
+        // STEP 1: Initialize task
         // ==========================================
         const step1Url = 'https://audiocleaner.ai/audio/api/v1/youtube-to-mp3/task/create';
-        await apiClient.post(step1Url, {
+        const step1Res = await apiClient.post(step1Url, {
             input_url: youtubeUrl,
             uuid: uuidv4(),
             model_type: 2,
             show_yt403_dialog: "0"
         });
+        console.log('[INFO] Step 1 completed:', step1Res.status);
 
         // ==========================================
         // STEP 2: Get video info & encrypted URLs
         // ==========================================
         const step2Url = 'https://vapi.extensiondock.com/api/youtube/v4/info';
-        const step2Payload = {
-            youtube_url: youtubeUrl,
-            cgeo: "BD" // Change to your preferred geo-code if needed
-        };
-        
+        const step2Payload = { youtube_url: youtubeUrl, cgeo: "US" };
         const nonce2 = uuidv4();
-        const step2Response = await apiClient.post(step2Url, step2Payload, {
+        
+        const step2Res = await apiClient.post(step2Url, step2Payload, {
             params: {
                 app_id: 'ai_external',
                 t: timestamp,
@@ -73,12 +84,12 @@ app.get('/api/dl', async (req, res) => {
             }
         });
 
-        if (step2Response.data.code !== 200) {
-            throw new Error(`Step 2 Failed: ${step2Response.data.msg}`);
+        if (step2Res.data.code !== 200) {
+            throw new Error(`Step 2 Failed: ${step2Res.data.msg || 'Unknown error'}`);
         }
 
-        // Find the best audio-only format (since the endpoint is youtube-to-mp3)
-        const qualities = step2Response.data.data.quality || [];
+        // Find the best audio-only format
+        const qualities = step2Res.data.data.quality || [];
         const targetQuality = qualities.find(q => q.is_audio === true) || qualities[0];
 
         if (!targetQuality || !targetQuality.url) {
@@ -86,18 +97,14 @@ app.get('/api/dl', async (req, res) => {
         }
 
         // ==========================================
-        // STEP 3: Resolve encrypted URL to final download link
+        // STEP 3: Resolve encrypted URL to final link
         // ==========================================
         const step3Url = 'https://vapi.extensiondock.com/api/youtube/v4/download';
-        const step3Payload = {
-            url: targetQuality.url,
-            quality: targetQuality.quality_label || ""
-        };
-
+        const step3Payload = { url: targetQuality.url, quality: targetQuality.quality_label || "" };
         const timestamp3 = Math.floor(Date.now() / 1000).toString();
         const nonce3 = uuidv4();
         
-        const step3Response = await apiClient.post(step3Url, step3Payload, {
+        const step3Res = await apiClient.post(step3Url, step3Payload, {
             params: {
                 app_id: 'ai_external',
                 t: timestamp3,
@@ -107,29 +114,35 @@ app.get('/api/dl', async (req, res) => {
             }
         });
 
-        if (step3Response.data.code !== 200) {
-            throw new Error(`Step 3 Failed: ${step3Response.data.msg}`);
+        if (step3Res.data.code !== 200) {
+            throw new Error(`Step 3 Failed: ${step3Res.data.msg || 'Unknown error'}`);
         }
 
         // ==========================================
-        // FINAL RESPONSE TO USER
+        // FINAL RESPONSE
         // ==========================================
         res.json({
             success: true,
             data: {
-                title: step2Response.data.data.title,
-                video_id: step2Response.data.data.video_id,
-                duration: step2Response.data.data.duration,
-                download_url: step3Response.data.data // The final resolved URL
+                title: step2Res.data.data.title,
+                video_id: step2Res.data.data.video_id,
+                duration: step2Res.data.data.duration,
+                download_url: step3Res.data.data
             }
         });
 
     } catch (error) {
-        console.error('Download API Error:', error.response?.data || error.message);
+        // Detailed logging to help you debug the exact failure point
+        console.error('=== DOWNLOAD API ERROR ===');
+        console.error('Message:', error.message);
+        console.error('Status:', error.response?.status);
+        console.error('Response Data:', error.response?.data);
+        console.error('==========================');
+        
         res.status(500).json({ 
             success: false, 
             error: 'Failed to process the download', 
-            details: error.response?.data?.msg || error.message 
+            details: error.response?.data?.msg || error.response?.data || error.message 
         });
     }
 });
