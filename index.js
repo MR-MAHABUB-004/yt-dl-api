@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,12 +21,14 @@ function extractYoutubeId(url) {
  * Uses a headless browser to solve the JS challenge and intercept the fresh cap_token.
  */
 async function getFreshCapToken(videoId) {
-    // Launch headless Chrome. 
-    // Note: --no-sandbox is required if deploying to Linux servers (Heroku, Render, AWS, etc.)
-    const browser = await puppeteer.launch({ 
-        headless: true, 
-        args: ['--no-sandbox', '--disable-setuid-sandbox'] 
+    // Launch using the pre-compiled binary path provided by @sparticuz/chromium
+    const browser = await puppeteer.launch({
+        args: [...chromium.args, '--hide-scrollbars', '--disable-web-security'],
+        defaultViewport: chromium.defaultViewport,
+        executablePath: await chromium.executablePath(),
+        headless: chromium.headless,
     });
+
     const page = await browser.newPage();
     
     // Set a mobile user agent to match the target site's expectations
@@ -57,11 +60,11 @@ async function getFreshCapToken(videoId) {
         // solve the challenge and call /api/verify.
         await page.goto(`https://embed.dlsrv.online/v2/full?videoId=${videoId}`, { 
             waitUntil: 'networkidle2', 
-            timeout: 20000 
+            timeout: 30000 
         });
         
         // Wait specifically for the verify request to ensure the token is captured
-        await page.waitForRequest(req => req.url().includes('/api/verify'), { timeout: 15000 });
+        await page.waitForRequest(req => req.url().includes('/api/verify'), { timeout: 20000 });
     } catch (error) {
         console.error("Puppeteer navigation/wait error:", error.message);
     }
@@ -84,22 +87,24 @@ async function getDownloadLinks(videoId, capToken, format = 'mp3', quality = '32
             'User-Agent': 'Mozilla/5.0 (Linux; Android 13; TECNO BG7 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.36 Mobile Safari/537.36',
             'Origin': 'https://embed.dlsrv.online',
             'Referer': `https://embed.dlsrv.online/v2/full?videoId=${videoId}`,
-            'X-Requested-With': 'mark.via.gq'
+            'X-Requested-With': 'mark.via.gq',
+            'Content-Type': 'application/json'
         }
     });
 
     // 1. Verify Token to get JWT
     const verifyRes = await instance.post('https://embed.dlsrv.online/api/verify', { capToken });
     const authToken = verifyRes.data.token;
-    if (!authToken) throw new Error("Failed to retrieve auth token.");
+    if (!authToken) throw new Error("Failed to retrieve auth token from /api/verify.");
     
+    // Add JWT to all subsequent requests
     instance.defaults.headers.common['Authorization'] = `Bearer ${authToken}`;
 
-    // 2. Touch Session
+    // 2. Touch Session (Keep-alive)
     await instance.post('https://embed.dlsrv.online/api/session/touch', { videoId });
 
     // 3. Get Download URL
-    const endpoint = format === 'mp3' ? 'mp3' : 'mp4';
+    const endpoint = format === 'mp4' ? 'mp4' : 'mp3';
     const dlRes = await instance.post(`https://embed.dlsrv.online/api/download/${endpoint}`, {
         videoId,
         format,
@@ -128,9 +133,11 @@ app.get('/dl', async (req, res) => {
         
         // Step 1: Get a fresh token using the headless browser
         const capToken = await getFreshCapToken(videoId);
+        console.log(`[Success] Extracted cap_token for ${videoId}`);
         
         // Step 2: Use the fresh token to get the download link
         const result = await getDownloadLinks(videoId, capToken, format, quality);
+        console.log(`[Success] Generated download link for ${videoId}`);
 
         // Step 3: Return clean JSON response
         res.json({
@@ -162,6 +169,6 @@ app.get('/', (req, res) => {
 
 // --- Start Server ---
 app.listen(PORT, () => {
-    console.log(`🚀 Server is running on http://localhost:${PORT}`);
+    console.log(`🚀 Server is running on port ${PORT}`);
     console.log(`📖 Try it: http://localhost:${PORT}/dl?url=https://www.youtube.com/watch?v=7WPiaHjl8AE`);
 });
