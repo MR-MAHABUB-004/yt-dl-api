@@ -1,21 +1,22 @@
 {
-  "name": "yt-downloader-api",
+  "name": "9convert-wrapper-api",
   "version": "1.0.0",
-  "description": "YouTube Video Downloader API using Puppeteer and dlsrv.online",
+  "description": "Node.js wrapper API for 9Convert/dlsrv.online YouTube downloader",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "node --watch index.js"
   },
+  "keywords": [
+    "youtube",
+    "downloader",
+    "api",
+    "express"
+  ],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
-    "axios": "^1.6.8",
-    "express": "^4.19.2",
-    "puppeteer": "^22.6.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "axios": "^1.7.2",
+    "express": "^4.19.2"
   }
 }
