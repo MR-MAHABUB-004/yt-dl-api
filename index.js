@@ -1,132 +1,139 @@
 const express = require('express');
 const axios = require('axios');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// --- Helper Functions ---
-
-/**
- * Extracts the 11-character video ID from various YouTube URL formats.
- */
-function extractYoutubeId(url) {
-    const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
-    const match = url.match(regex);
-    return match ? match[1] : null;
-}
-
-/**
- * Executes the reverse-engineered dlsrv.online API flow.
- */
-async function getDownloadLinks(videoId, formatType = "mp3", quality = "320") {
-    // Create an axios instance to act as a session (persists headers)
-    const session = axios.create({
-        headers: {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 13; TECNO BG7 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.36 Mobile Safari/537.36",
-            "sec-ch-ua-platform": "\"Android\"",
-            "sec-ch-ua-mobile": "?1",
-            "X-Requested-With": "mark.via.gq",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Origin": "https://embed.dlsrv.online",
-            "Referer": `https://embed.dlsrv.online/v2/full?videoId=${videoId}`
-        }
-    });
-
-    try {
-        // 1. Fetch Challenge (Anti-bot)
-        const challengeUrl = "https://check.dlsrv.online/30bb427100/challenge";
-        await session.post(challengeUrl);
-
-        // 2. Verify Token to get JWT
-        // IMPORTANT: In a production environment, you must solve the 'instrumentation' 
-        // payload from step 1 to generate a valid capToken.
-        const capToken = "30bb427100:23c071092a584d4f:2179cba9d7b996d30f82c4212e6cc7";
-        
-        const verifyRes = await session.post("https://embed.dlsrv.online/api/verify", { 
-            capToken 
-        });
-        
-        const authToken = verifyRes.data.token;
-        if (!authToken) {
-            throw new Error("Failed to retrieve auth token. The capToken might have expired.");
-        }
-
-        // Update session headers with the new auth token
-        session.defaults.headers.common["Authorization"] = `Bearer ${authToken}`;
-
-        // 3. Touch Session
-        await session.post("https://embed.dlsrv.online/api/session/touch", { 
-            videoId 
-        });
-
-        // 4. Get Download URL
-        const downloadEndpoint = formatType === "mp3" 
-            ? "https://embed.dlsrv.online/api/download/mp3" 
-            : "https://embed.dlsrv.online/api/download/mp4";
-            
-        const downloadRes = await session.post(downloadEndpoint, {
-            videoId,
-            format: formatType,
-            quality
-        });
-
-        return downloadRes.data;
-
-    } catch (error) {
-        // Map errors to match the Python HTTPException behavior
-        if (error.response) {
-            const err = new Error(`Upstream API error: ${error.message}`);
-            err.status = 502;
-            throw err;
-        } else {
-            const err = new Error(error.message);
-            err.status = 500;
-            throw err;
-        }
+// Configure axios with a 120-second (2 minute) timeout as requested
+const apiClient = axios.create({
+    timeout: 120000,
+    headers: {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 13; TECNO BG7 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.36 Mobile Safari/537.36',
+        'Origin': 'https://audiocleaner.ai',
+        'Referer': 'https://audiocleaner.ai/'
     }
+});
+
+/**
+ * TODO: REVERSE-ENGINEER THIS FUNCTION
+ * Extract the actual algorithm from the Chrome Extension or Website's obfuscated JS.
+ * It likely uses CryptoJS, WebCrypto API, or a custom HMAC hash combining the payload, timestamp, and nonce.
+ */
+function generateSign(payload, timestamp, nonce) {
+    return 'PLACEHOLDER_SIGN_REPLACE_ME';
 }
 
-// --- API Endpoints ---
+/**
+ * TODO: REVERSE-ENGINEER THIS FUNCTION
+ * Extract the actual algorithm from the Chrome Extension or Website's obfuscated JS.
+ */
+function generateSecretKey(payload, timestamp, nonce) {
+    return 'PLACEHOLDER_SECRET_KEY_REPLACE_ME';
+}
 
-app.get('/dl', async (req, res) => {
+app.get('/api/dl', async (req, res) => {
+    const { url: youtubeUrl } = req.query;
+
+    if (!youtubeUrl) {
+        return res.status(400).json({ error: 'YouTube URL is required. Usage: /api/dl?url=<youtube_url>' });
+    }
+
     try {
-        const { url, format = 'mp3', quality = '320' } = req.query;
+        const timestamp = Math.floor(Date.now() / 1000).toString();
+        
+        // ==========================================
+        // STEP 1: Initialize task on audiocleaner.ai
+        // ==========================================
+        const step1Url = 'https://audiocleaner.ai/audio/api/v1/youtube-to-mp3/task/create';
+        await apiClient.post(step1Url, {
+            input_url: youtubeUrl,
+            uuid: uuidv4(),
+            model_type: 2,
+            show_yt403_dialog: "0"
+        });
 
-        if (!url) {
-            return res.status(400).json({ error: "Missing 'url' query parameter." });
+        // ==========================================
+        // STEP 2: Get video info & encrypted URLs
+        // ==========================================
+        const step2Url = 'https://vapi.extensiondock.com/api/youtube/v4/info';
+        const step2Payload = {
+            youtube_url: youtubeUrl,
+            cgeo: "BD" // Change to your preferred geo-code if needed
+        };
+        
+        const nonce2 = uuidv4();
+        const step2Response = await apiClient.post(step2Url, step2Payload, {
+            params: {
+                app_id: 'ai_external',
+                t: timestamp,
+                nonce: nonce2,
+                sign: generateSign(step2Payload, timestamp, nonce2),
+                secret_key: generateSecretKey(step2Payload, timestamp, nonce2)
+            }
+        });
+
+        if (step2Response.data.code !== 200) {
+            throw new Error(`Step 2 Failed: ${step2Response.data.msg}`);
         }
 
-        // 1. Validate and extract Video ID
-        const videoId = extractYoutubeId(url);
-        if (!videoId) {
-            return res.status(400).json({ error: "Invalid YouTube URL. Could not extract Video ID." });
+        // Find the best audio-only format (since the endpoint is youtube-to-mp3)
+        const qualities = step2Response.data.data.quality || [];
+        const targetQuality = qualities.find(q => q.is_audio === true) || qualities[0];
+
+        if (!targetQuality || !targetQuality.url) {
+            throw new Error('No downloadable quality found in response');
         }
 
-        // 2. Fetch download data
-        const result = await getDownloadLinks(videoId, format, quality);
+        // ==========================================
+        // STEP 3: Resolve encrypted URL to final download link
+        // ==========================================
+        const step3Url = 'https://vapi.extensiondock.com/api/youtube/v4/download';
+        const step3Payload = {
+            url: targetQuality.url,
+            quality: targetQuality.quality_label || ""
+        };
 
-        // 3. Return clean JSON response
+        const timestamp3 = Math.floor(Date.now() / 1000).toString();
+        const nonce3 = uuidv4();
+        
+        const step3Response = await apiClient.post(step3Url, step3Payload, {
+            params: {
+                app_id: 'ai_external',
+                t: timestamp3,
+                nonce: nonce3,
+                sign: generateSign(step3Payload, timestamp3, nonce3),
+                secret_key: generateSecretKey(step3Payload, timestamp3, nonce3)
+            }
+        });
+
+        if (step3Response.data.code !== 200) {
+            throw new Error(`Step 3 Failed: ${step3Response.data.msg}`);
+        }
+
+        // ==========================================
+        // FINAL RESPONSE TO USER
+        // ==========================================
         res.json({
             success: true,
-            video_id: videoId,
-            format: format,
-            quality: quality,
-            filename: result.filename,
-            download_url: result.url,
-            status: result.status
+            data: {
+                title: step2Response.data.data.title,
+                video_id: step2Response.data.data.video_id,
+                duration: step2Response.data.data.duration,
+                download_url: step3Response.data.data // The final resolved URL
+            }
         });
 
     } catch (error) {
-        const statusCode = error.status || 500;
-        res.status(statusCode).json({ error: error.message });
+        console.error('Download API Error:', error.response?.data || error.message);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to process the download', 
+            details: error.response?.data?.msg || error.message 
+        });
     }
 });
 
-app.get('/', (req, res) => {
-    res.json({ message: "YouTube Downloader API is running. Use /dl?url=<youtube_url>" });
-});
-
-// --- Start Server ---
 app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+    console.log(`YouTube Downloader API running on http://localhost:${PORT}`);
 });
