@@ -3,7 +3,7 @@ const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 7270;
 
 // Configure axios with a 120-second (2 minute) timeout as requested
 const apiClient = axios.create({
